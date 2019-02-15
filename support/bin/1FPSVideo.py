@@ -5,9 +5,6 @@
 # through the CC0 1.0 Universal public domain dedication.
 # https://creativecommons.org/publicdomain/zero/1.0/legalcode
 #
-# RepeatedTimer code taken mostly from
-# http://stackoverflow.com/questions/3393612/run-certain-code-every-n-seconds
-#
 # Author(s):
 #   Bill Tollett <wtollett@usgs.gov>
 
@@ -18,125 +15,86 @@ import os
 import requests
 import shutil
 import subprocess
-import sys
 import tomputils.util as tutil
 
+from datetime import datetime, timedelta
 from pathlib import Path
-from threading import Timer
-from time import sleep, strftime
+from requests.auth import HTTPDigestAuth
+from sys import exit
+from twisted.internet import task, reactor
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-c', '--config', type=str, required=True,
                     help='Config File')
 
-DATE = strftime('%Y-%m-%d')
-HOUR = strftime('%H')
-TFMT = '%Y-%m-%d %H:%M:%S'
-APATH = Path(os.getenv('VID_LOC', '/data'))
-FPATH = Path('/tmp') / HOUR
+starttm = datetime.now()
+sdate = starttm.strftime('%Y-%m-%d')
+shour = starttm.strftime('%H')
+endtm = None
+loop = None
+archpath = Path(os.getenv('VID_LOC', '/data'))
+tmppath = Path('/tmp') / shour
 count = 0
 
 
-class RepeatedTimer(object):
-    def __init__(self, interval, function, *args, **kwargs):
-        self._timer = None
-        self.interval = interval
-        self.function = function
-        self.args = args
-        self.kwargs = kwargs
-        self.is_running = False
-        self.start()
-
-    def _run(self):
-        self.is_running = False
-        self.start()
-        self.function(*self.args, **self.kwargs)
-
-    def start(self):
-        if not self.is_running:
-            self._timer = Timer(self.interval, self._run)
-            self._timer.start()
-            self.is_running = True
-
-    def stop(self):
-        self._timer.cancel()
-        self.is_running = False
-
-
-def get_image(url):
+def get_image():
     global count
-    r = requests.get(url)
-    with open('image%04d.jpg' % count, 'wb') as f:
-        f.write(r.content)
-    r.close()
-    count += 1
+    if datetime.now() < endtm:
+        if 'auth' in config:
+            r = requests.get(config['url'],
+                             auth=HTTPDigestAuth(config['auth']['user'],
+                                                 config['auth']['passwd']))
+        else:
+            r = requests.get(config['url'])
 
-
-def get_protected_image(url, user, passwd):
-    global count
-    r = requests.get(url, auth=requests.auth.HTTPDigestAuth(user, passwd))
-    with open('image%04d.jpg' % count, 'wb') as f:
-        f.write(r.content)
-    r.close()
-    count += 1
-
-
-def collect_images(interval, slp, url, user=None, passwd=None):
-    logger.debug('Starting image acquisition')
-    if user:
-        rt = RepeatedTimer(int(interval), get_protected_image,
-                           *[url, user, passwd])
+        with open('image%04d.jpg' % count, 'wb') as f:
+            f.write(r.content)
+        r.close()
+        count += 1
     else:
-        rt = RepeatedTimer(int(interval), get_image, url)
-    try:
-        sleep(float(slp))
-    finally:
-        rt.stop()
+        loop.stop()
+        return
 
 
-def delete_failed_images(minfilesize):
-    logger.debug('Delete failed images')
-    files = FPATH.glob('*.jpg')
+def fix_images():
+    logger.debug('Delete any failed images')
+    files = tmppath.glob('*.jpg')
+    sz = int(config['1fps']['minFileSize'])
     for f in files:
-        if f.stat().st_size < int(minfilesize):
+        if f.stat().st_size < sz:
             f.unlink()
 
-
-def renumber_images():
     logger.debug('Renumber images')
     c = 0
-    files = sorted(FPATH.glob('*.jpg'))
+    files = sorted(tmppath.glob('*.jpg'))
     for f in files:
         f.rename('image%04d.jpg' % c)
         c += 1
 
 
 def encode_video():
-    logger.debug('Encode video')
     cmd = ['ffmpeg', '-framerate', '5', '-i', 'image%04d.jpg', '-c:v',
            'libx265', '-crf', '28', '-vf', 'scale=iw*.75:ih*.75', '-threads',
-           '1', '1fps_{}00.mp4'.format(HOUR)]
+           '1', '1fps_{}00.mp4'.format(shour)]
+    logger.debug('Encode video: {}'.format(' '.join(cmd)))
     subprocess.call(cmd)
 
 
-def copy_to_share(camname):
+def copy_to_share():
     logger.info('Copying to share')
-    path = APATH / camname / DATE
+    path = archpath / config['cam'] / sdate
     if not path.exists():
         logger.debug('Creating new archive directory: {}'.format(path))
         path.mkdir(parents=True)
-    shutil.copy2('{}/1fps_{}00.mp4'.format(FPATH, HOUR), '{}/'.format(path))
+    shutil.copy2('{}/1fps_{}00.mp4'.format(tmppath, shour), '{}/'.format(path))
 
 
-def cleanup():
-    logger.debug('Deleting stuff')
-    ftypes = ('*.jpg', '*.mp4')
-    files = []
-    for t in ftypes:
-        files.extend(FPATH.glob(t))
-    for f in files:
-        f.unlink()
-    FPATH.rmdir()
+def images_to_video_to_share(result):
+    logger.info('Images gathered, creating video')
+    fix_images()
+    encode_video()
+    copy_to_share()
+    reactor.stop()
 
 
 def parse_config(confFile):
@@ -145,7 +103,23 @@ def parse_config(confFile):
         return json.load(f)
 
 
-if __name__ == '__main__':
+def loop_failed(failure):
+    logger.error(failure.getBriefTraceback())
+    reactor.stop()
+
+
+def cleanup():
+    logger.debug('Deleting stuff')
+    ftypes = ('*.jpg', '*.mp4')
+    files = []
+    for t in ftypes:
+        files.extend(tmppath.glob(t))
+    for f in files:
+        f.unlink()
+    tmppath.rmdir()
+
+
+def main():
     global logger
     logger = tutil.setup_logging("1FPS")
     if 'PYLOGLEVEL' in os.environ:
@@ -154,30 +128,31 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     logger.info('Starting')
-    conf = parse_config(args.config)
+
+    global config
+    config = parse_config(args.config)
+    global endtm
+    endtm = starttm + timedelta(seconds=config['1fps']['time'])
 
     try:
-        FPATH.mkdir()
-        os.chdir(str(FPATH))
+        tmppath.mkdir()
+        os.chdir(str(tmppath))
     except FileExistsError as e:
         logger.error('Temp path already exists. Is another process using it?')
         logger.error(e)
         logger.info('Exiting because of error')
-        sys.exit(0)
+        exit(0)
 
-    if 'auth' in conf:
-        collect_images(conf['1fps']['interval'], conf['1fps']['time'],
-                       conf['url'], conf['auth']['user'],
-                       conf['auth']['passwd'])
-    else:
-        collect_images(conf['1fps']['interval'], conf['1fps']['time'],
-                       conf['url'])
-
-    logger.info('Images gathered, create video')
-    delete_failed_images(conf['1fps']['minFileSize'])
-    renumber_images()
-    encode_video()
-    copy_to_share(conf['cam'])
+    global loop
+    loop = task.LoopingCall(get_image)
+    loopDeferred = loop.start(config['1fps']['interval'])
+    loopDeferred.addCallback(images_to_video_to_share)
+    loopDeferred.addErrback(loop_failed)
+    reactor.run()
     cleanup()
     logger.info('Finished')
     logging.shutdown()
+
+
+if __name__ == '__main__':
+    main()
