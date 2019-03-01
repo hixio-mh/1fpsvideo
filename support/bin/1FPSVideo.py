@@ -20,6 +20,7 @@ import tomputils.util as tutil
 from datetime import datetime, timedelta
 from pathlib import Path
 from requests.auth import HTTPDigestAuth
+from requests.exceptions import Timeout, ConnectionError, RequestException
 from sys import exit
 from twisted.internet import task, reactor
 
@@ -34,23 +35,32 @@ endtm = None
 loop = None
 archpath = Path(os.getenv('VID_LOC', '/data'))
 tmppath = Path('/tmp') / shour
+timeout = None
 count = 0
 
 
 def get_image():
     global count
     if datetime.now() < endtm:
-        if 'auth' in config:
-            r = requests.get(config['url'],
-                             auth=HTTPDigestAuth(config['auth']['user'],
-                                                 config['auth']['passwd']))
-        else:
-            r = requests.get(config['url'])
+        try:
+            if 'auth' in config:
+                r = requests.get(config['url'],
+                                 auth=HTTPDigestAuth(config['auth']['user'],
+                                                     config['auth']['passwd']),
+                                 timeout=timeout)
+            else:
+                r = requests.get(config['url'], timeout=timeout)
 
-        with open('image%04d.jpg' % count, 'wb') as f:
-            f.write(r.content)
-        r.close()
-        count += 1
+            with open('image%04d.jpg' % count, 'wb') as f:
+                f.write(r.content)
+            r.close()
+            count += 1
+        except ConnectionError as e:
+            logger.error('Connection error: {}'.format(e))
+        except Timeout as e:
+            logger.error('Timeout: {}'.format(e))
+        except RequestException as e:
+            logger.error('Other requests error: {}'.format(e))
     else:
         loop.stop()
         return
@@ -133,6 +143,8 @@ def main():
     config = parse_config(args.config)
     global endtm
     endtm = starttm + timedelta(seconds=config['1fps']['time'])
+    global timeout
+    timeout = int(config['1fps']['interval']) * 2
 
     try:
         tmppath.mkdir()
