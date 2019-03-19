@@ -1,3 +1,7 @@
+# 1fpsvideo
+
+[![Build Status](https://travis-ci.org/wtollett-usgs/1fpsvideo.svg?branch=master)](https://travis-ci.org/wtollett-usgs/1fpsvideo)
+
 ## Usage
 ---
 Expected volume mounts:
