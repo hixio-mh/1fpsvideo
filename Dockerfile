@@ -1,5 +1,7 @@
 FROM jrottenberg/ffmpeg:4.0
 
+LABEL maintainer="wtollett@usgs.gov"
+
 RUN apt-get update \
     && apt-get install -y python3-pip libcurl4-openssl-dev libssl-dev
 
