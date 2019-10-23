@@ -1,4 +1,4 @@
 requests~=2.22.0
 service-identity~=18.1.0
 tomputils~=1.11.1
-twisted~=19.2.1
+twisted~=19.7.0
